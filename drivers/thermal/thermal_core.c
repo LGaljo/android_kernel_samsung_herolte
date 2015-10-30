@@ -38,6 +38,7 @@
 #include <linux/suspend.h>
 #include <net/netlink.h>
 #include <net/genetlink.h>
+#include <linux/suspend.h>
 
 #define CREATE_TRACE_POINTS
 #include <trace/events/thermal.h>
@@ -68,6 +69,7 @@ static void start_poll_queue(struct thermal_zone_device *tz, int delay)
 			msecs_to_jiffies(delay));
 }
 #endif
+static atomic_t in_suspend;
 
 static struct thermal_governor *def_governor;
 
@@ -513,7 +515,10 @@ void thermal_zone_device_update(struct thermal_zone_device *tz)
 	struct thermal_instance *instance;
 #endif
 
-	if (!tz->ops->get_mode)
+	if (atomic_read(&in_suspend))
+		return;
+
+	if (!tz->ops->get_temp)
 		return;
 
 	update_temperature(tz);
@@ -2013,7 +2018,7 @@ static void __exit thermal_exit(void)
 	unregister_pm_notifier(&thermal_pm_notifier);
 #ifdef CONFIG_SCHED_HMP
 	unregister_hotcpu_notifier(&thermal_cpu_notifier);
-#endif
+#endifp
 	of_thermal_destroy_zones();
 	genetlink_exit();
 	class_unregister(&thermal_class);
