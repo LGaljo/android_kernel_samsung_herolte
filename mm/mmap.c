@@ -469,13 +469,17 @@ static void validate_mm(struct mm_struct *mm)
 	struct vm_area_struct *vma = mm->mmap;
 
 	while (vma) {
+		struct anon_vma *anon_vma = vma->anon_vma;
 		struct anon_vma_chain *avc;
 
-		vma_lock_anon_vma(vma);
-		list_for_each_entry(avc, &vma->anon_vma_chain, same_vma)
-			anon_vma_interval_tree_verify(avc);
-		vma_unlock_anon_vma(vma);
-		highest_address = vm_end_gap(vma);
+		if (anon_vma) {
+			anon_vma_lock_read(anon_vma);
+			list_for_each_entry(avc, &vma->anon_vma_chain, same_vma)
+				anon_vma_interval_tree_verify(avc);
+			anon_vma_unlock_read(anon_vma);
+		}
+
+		highest_address = vma->vm_end;
 		vma = vma->vm_next;
 		i++;
 	}
@@ -2186,17 +2190,19 @@ static int acct_stack_growth(struct vm_area_struct *vma,
  */
 int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 {
-	struct vm_area_struct *next;
-	unsigned long gap_addr;
-        int error = 0;
+	int error = 0;
 
 	if (!(vma->vm_flags & VM_GROWSUP))
 		return -EFAULT;
 
 	/* Guard against wrapping around to address 0. */
-	address &= PAGE_MASK;
-	address += PAGE_SIZE;
-	if (!address)
+	if (address < PAGE_ALIGN(address+4))
+		address = PAGE_ALIGN(address+4);
+	else
+		return -ENOMEM;
+
+	/* We must make sure the anon_vma is allocated. */
+	if (unlikely(anon_vma_prepare(vma)))
 		return -ENOMEM;
 
 	/* Enforce stack_guard_gap */
@@ -2219,7 +2225,7 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 	 * is required to hold the mmap_sem in read mode.  We need the
 	 * anon_vma lock to serialize against concurrent expand_stacks.
 	 */
-	vma_lock_anon_vma(vma);
+	anon_vma_lock_write(vma->anon_vma);
 
 	/* Somebody else might have raced and expanded it already */
 	if (address > vma->vm_end) {
@@ -2237,7 +2243,7 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 				 * updates, but we only hold a shared mmap_sem
 				 * lock here, so we need to protect against
 				 * concurrent vma expansions.
-				 * vma_lock_anon_vma() doesn't help here, as
+				 * anon_vma_lock_write() doesn't help here, as
 				 * we don't guarantee that all growable vmas
 				 * in a mm share the same root anon vma.
 				 * So, we reuse mm->page_table_lock to guard
@@ -2257,7 +2263,7 @@ int expand_upwards(struct vm_area_struct *vma, unsigned long address)
 			}
 		}
 	}
-	vma_unlock_anon_vma(vma);
+	anon_vma_unlock_write(vma->anon_vma);
 	khugepaged_enter_vma_merge(vma, vma->vm_flags);
 	validate_mm(vma->vm_mm);
 	return error;
@@ -2279,17 +2285,6 @@ int expand_downwards(struct vm_area_struct *vma,
 	if (error)
 		return error;
 
-	/* Enforce stack_guard_gap */
-	gap_addr = address - stack_guard_gap;
-	if (gap_addr > address)
-		return -ENOMEM;
-	prev = vma->vm_prev;
-	if (prev && prev->vm_end > gap_addr) {
-		if (!(prev->vm_flags & VM_GROWSDOWN))
-			return -ENOMEM;
-		/* Check that both stack segments have the same anon_vma? */
-	}
-
 	/* We must make sure the anon_vma is allocated. */
 	if (unlikely(anon_vma_prepare(vma)))
 		return -ENOMEM;
@@ -2299,7 +2294,7 @@ int expand_downwards(struct vm_area_struct *vma,
 	 * is required to hold the mmap_sem in read mode.  We need the
 	 * anon_vma lock to serialize against concurrent expand_stacks.
 	 */
-	vma_lock_anon_vma(vma);
+	anon_vma_lock_write(vma->anon_vma);
 
 	/* Somebody else might have raced and expanded it already */
 	if (address < vma->vm_start) {
@@ -2317,7 +2312,7 @@ int expand_downwards(struct vm_area_struct *vma,
 				 * updates, but we only hold a shared mmap_sem
 				 * lock here, so we need to protect against
 				 * concurrent vma expansions.
-				 * vma_lock_anon_vma() doesn't help here, as
+				 * anon_vma_lock_write() doesn't help here, as
 				 * we don't guarantee that all growable vmas
 				 * in a mm share the same root anon vma.
 				 * So, we reuse mm->page_table_lock to guard
@@ -2335,7 +2330,7 @@ int expand_downwards(struct vm_area_struct *vma,
 			}
 		}
 	}
-	vma_unlock_anon_vma(vma);
+	anon_vma_unlock_write(vma->anon_vma);
 	khugepaged_enter_vma_merge(vma, vma->vm_flags);
 	validate_mm(vma->vm_mm);
 	return error;
